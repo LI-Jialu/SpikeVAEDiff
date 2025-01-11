@@ -1,59 +1,103 @@
 import sys
 import numpy as np
+import pandas as pd
 import sklearn.linear_model as skl
+import pickle
 import argparse
-parser = argparse.ArgumentParser(description='Argument Parser')
-parser.add_argument("-sub", "--sub",help="Subject Number",default=1)
+import os
+
+# Argument Parser
+parser = argparse.ArgumentParser(description="Spike Regression for VAE Latents")
+parser.add_argument("-spike", "--spike_path", help="Path to spike data CSV", default="./data/design_array_VISp.csv")
+parser.add_argument("-map", "--map_path", help="Path to image-spike map CSV", default="./data/stimuli_index_image_index.csv")
+parser.add_argument("-img", "--image_path", help="Path to image latents", default="./data/extracted_features/nsd_vdvae_features_31l.npz")
 args = parser.parse_args()
-sub=int(args.sub)
-assert sub in [1,2,5,7]
 
-nsd_features = np.load('data/extracted_features/subj{:02d}/nsd_vdvae_features_31l.npz'.format(sub))
-train_latents = nsd_features['train_latents']
-test_latents = nsd_features['test_latents']
+# Paths
+spike_path = args.spike_path
+map_path = args.map_path
+image_path = args.image_path
 
-train_path = 'data/processed_data/subj{:02d}/nsd_train_fmriavg_nsdgeneral_sub{}.npy'.format(sub,sub)
-train_fmri = np.load(train_path)
-test_path = 'data/processed_data/subj{:02d}/nsd_test_fmriavg_nsdgeneral_sub{}.npy'.format(sub,sub)
-test_fmri = np.load(test_path)
+print(f"Using spike data path: {spike_path}")
+print(f"Using mapping data path: {map_path}")
+print(f"Using image latents path: {image_path}")
 
-## Preprocessing fMRI
+# Load spike data
+spike_data = pd.read_csv(spike_path, header=0)  # No header in the file
+design_array = spike_data.values  # Convert to NumPy array
+print(f"[INFO] Spike data loaded. Shape: {design_array.shape}")
 
-train_fmri = train_fmri/300
-test_fmri = test_fmri/300
+# Load image-to-spike map
+mapping = pd.read_csv(map_path)
+print(f"[INFO] Mapping data loaded. Shape: {mapping.shape}")
+print(f"[INFO] Mapping columns: {mapping.columns.tolist()}")
 
+# Load image latents
+image_latents = np.load(image_path)
+train_latents = image_latents['train_latents']  # Training image latents
+print(f"[INFO] Image latents loaded. Shape: {train_latents.shape}")
 
-norm_mean_train = np.mean(train_fmri, axis=0)
-norm_scale_train = np.std(train_fmri, axis=0, ddof=1)
-train_fmri = (train_fmri - norm_mean_train) / norm_scale_train
-test_fmri = (test_fmri - norm_mean_train) / norm_scale_train
+# Expand images to match spike data
+image_indices = mapping['frame'].astype(int).values  # Image indices (frame column in mapping)
+spike_to_image_indices = mapping['index'].values  # Spike indices
+expanded_images = train_latents[image_indices]  # Repeat images to match spikes
+print(f"[INFO] Expanded image latents to match spikes. Shape: {expanded_images.shape}")
 
-print(np.mean(train_fmri),np.std(train_fmri))
-print(np.mean(test_fmri),np.std(test_fmri))
+# Aggregate spike data by image index
+print("[INFO] Aggregating spike data by image index...")
+train_spike = np.zeros((train_latents.shape[0], design_array.shape[1]))
+image_spike_counts = np.zeros(train_latents.shape[0])  # Count occurrences for each image index
+for i, img_idx in enumerate(image_indices):
+    train_spike[img_idx] += design_array[i]
+    image_spike_counts[img_idx] += 1
 
-print(np.max(train_fmri),np.min(train_fmri))
-print(np.max(test_fmri),np.min(test_fmri))
+# Average aggregated spike data
+train_spike = train_spike / np.maximum(image_spike_counts[:, None], 1)
+print(f"[DEBUG] Train spike shape after aggregation: {train_spike.shape}")
 
-num_voxels, num_train, num_test = train_fmri.shape[1], len(train_fmri), len(test_fmri)
+# Check shapes of train_spike and train_latents
+print(f"[DEBUG] Train spike shape: {train_spike.shape}")
+print(f"[DEBUG] Train latents shape: {train_latents.shape}")
 
-## latents Features Regression
-print('Training latents Feature Regression')
+# Normalize spike data
+norm_mean_train = np.mean(train_spike, axis=0)
+norm_scale_train = np.std(train_spike, axis=0, ddof=1)
+train_spike = (train_spike - norm_mean_train) / norm_scale_train
+print(f"[INFO] Normalized train spike data. Mean: {np.mean(train_spike)}, Std: {np.std(train_spike)}")
 
-reg = skl.Ridge(alpha=50000, max_iter=10000, fit_intercept=True)
-reg.fit(train_fmri, train_latents)
-pred_test_latent = reg.predict(test_fmri)
-std_norm_test_latent = (pred_test_latent - np.mean(pred_test_latent,axis=0)) / np.std(pred_test_latent,axis=0)
-pred_latents = std_norm_test_latent * np.std(train_latents,axis=0) + np.mean(train_latents,axis=0)
-print(reg.score(test_fmri,test_latents))
+# Ensure consistent samples
+if train_spike.shape[0] != train_latents.shape[0]:
+    print("[ERROR] Sample size mismatch between train_spike and train_latents!")
+    print(f"train_spike samples: {train_spike.shape[0]}, train_latents samples: {train_latents.shape[0]}")
+    sys.exit(1)
 
-np.save('data/predicted_features/subj{:02d}/nsd_vdvae_nsdgeneral_pred_sub{}_31l_alpha50k.npy'.format(sub,sub),pred_latents)
+# Regression
+print("[INFO] Training regression model...")
+try:
+    reg = skl.Ridge(alpha=100000, max_iter=50000, fit_intercept=True)
+    reg.fit(train_spike, train_latents)  # Regression training
+    predicted_latents = reg.predict(train_spike)
+    print(f"[INFO] Regression score: {reg.score(train_spike, train_latents)}")
+except ValueError as e:
+    print(f"[ERROR] Regression failed: {e}")
+    print(f"[DEBUG] Spike shape: {train_spike.shape}, Latents shape: {train_latents.shape}")
+    sys.exit(1)
 
+# Save results
+output_dir = "./data/predicted_features/"
+os.makedirs(output_dir, exist_ok=True)
+
+np.savez(
+    os.path.join(output_dir, "vdvae_predicted_latents.npz"),
+    predicted_latents=predicted_latents
+)
 
 datadict = {
-    'weight' : reg.coef_,
-    'bias' : reg.intercept_,
-
+    'weight': reg.coef_,
+    'bias': reg.intercept_
 }
 
-with open('data/regression_weights/subj{:02d}/vdvae_regression_weights.pkl'.format(sub),"wb") as f:
-  pickle.dump(datadict,f)
+with open(os.path.join(output_dir, "vdvae_regression_weights.pkl"), "wb") as f:
+    pickle.dump(datadict, f)
+
+print("[INFO] Regression complete and results saved.")

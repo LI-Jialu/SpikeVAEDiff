@@ -22,18 +22,11 @@ import scipy as sp
 
 import argparse
 parser = argparse.ArgumentParser(description='Argument Parser')
-parser.add_argument("-sub", "--sub",help="Subject Number",default=1)
 args = parser.parse_args()
-sub=int(args.sub)
-assert sub in [0,1,2,5,7]
 
 
-images_dir = 'data/nsddata_stimuli/test_images'
-feats_dir = 'data/eval_features/test_images'
-
-if sub in [1,2,5,7]:
-    feats_dir = 'data/eval_features/subj{:02d}'.format(sub)
-    images_dir = 'results/versatile_diffusion/subj{:02d}'.format(sub)
+images_dir = 'data/spike_stimuli/natural_scenes_dataset'
+feats_dir = 'data/eval_features/natural_scenes_dataset'
 
 if not os.path.exists(feats_dir):
    os.makedirs(feats_dir)

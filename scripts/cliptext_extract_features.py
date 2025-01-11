@@ -2,56 +2,57 @@ import sys
 sys.path.append('versatile_diffusion')
 import os
 import numpy as np
+import pandas as pd
 
 import torch
 from lib.cfg_helper import model_cfg_bank
 from lib.model_zoo import get_model
-from torch.utils.data import DataLoader, Dataset
 
-from lib.model_zoo.vd import VD
-from lib.cfg_holder import cfg_unique_holder as cfguh
-from lib.cfg_helper import get_command_line_args, cfg_initiates, load_cfg_yaml
-import matplotlib.pyplot as plt
-import torchvision.transforms as T
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-import argparse
-parser = argparse.ArgumentParser(description='Argument Parser')
-parser.add_argument("-sub", "--sub",help="Subject Number",default=1)
-args = parser.parse_args()
-sub=int(args.sub)
-assert sub in [1,2,5,7]
-
+# 模型配置和加载
 cfgm_name = 'vd_noema'
 pth = 'versatile_diffusion/pretrained/vd-four-flow-v1-0-fp16-deprecated.pth'
 cfgm = model_cfg_bank()(cfgm_name)
 net = get_model()(cfgm)
 sd = torch.load(pth, map_location='cpu')
-net.load_state_dict(sd, strict=False)    
-
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+net.load_state_dict(sd, strict=False)
 net.clip = net.clip.to(device)
-   
-train_caps = np.load('data/processed_data/subj{:02d}/nsd_train_cap_sub{}.npy'.format(sub,sub)) 
-test_caps = np.load('data/processed_data/subj{:02d}/nsd_test_cap_sub{}.npy'.format(sub,sub))  
 
-num_embed, num_features, num_test, num_train = 77, 768, len(test_caps), len(train_caps)
+# 从CSV加载数据
+csv_path = './data/spike_stimuli/image_captions.csv'  # 替换为你的CSV文件路径
+df = pd.read_csv(csv_path)
 
-train_clip = np.zeros((num_train,num_embed, num_features))
-test_clip = np.zeros((num_test,num_embed, num_features))
-with torch.no_grad():
-    for i,annots in enumerate(test_caps):
-        cin = list(annots[annots!=''])
-        print(i)
-        c = net.clip_encode_text(cin)
-        test_clip[i] = c.to('cpu').numpy().mean(0)
-    
-    np.save('data/extracted_features/subj{:02d}/nsd_cliptext_test.npy'.format(sub),test_clip)
-        
-    for i,annots in enumerate(train_caps):
-        cin = list(annots[annots!=''])
-        print(i)
-        c = net.clip_encode_text(cin)
-        train_clip[i] = c.to('cpu').numpy().mean(0)
-    np.save('data/extracted_features/subj{:02d}/nsd_cliptext_train.npy'.format(sub),train_clip)
+# 将前80%数据分为训练集，后20%数据分为测试集
+train_split = int(0.8 * len(df))
+train_data = df.iloc[:train_split]
+test_data = df.iloc[train_split:]
 
+# 提取特征函数
+def extract_features(data, save_path, model, device):
+    num_samples = len(data)
+    num_embed = 77
+    num_features = 768
+    clip_features = np.zeros((num_samples, num_embed, num_features))
 
+    with torch.no_grad():
+        for i, caption in enumerate(data['caption']):  # 假设CSV中有一列名为'caption'
+            if not isinstance(caption, str) or caption.strip() == "":
+                print(f"Skipping empty caption at index {i}")
+                continue
+            
+            cin = [caption]
+            print(f"Processing {i + 1}/{num_samples}: {cin}")
+            c = model.clip_encode_text(cin)
+            clip_features[i] = c.to('cpu').numpy().mean(0)
+
+    # 保存特征到指定路径
+    np.save(save_path, clip_features)
+    print(f"Features saved to {save_path}")
+
+# 提取并保存训练集和测试集的特征
+train_save_path = 'data/extracted_features/nsd_cliptext_train.npy'
+test_save_path = 'data/extracted_features/nsd_cliptext_test.npy'
+
+extract_features(train_data, train_save_path, net, device)
+extract_features(test_data, test_save_path, net, device)

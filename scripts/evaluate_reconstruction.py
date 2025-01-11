@@ -11,11 +11,7 @@ from PIL import Image
 
 import argparse
 parser = argparse.ArgumentParser(description='Argument Parser')
-parser.add_argument("-sub", "--sub",help="Subject Number",default=1)
 args = parser.parse_args()
-sub=int(args.sub)
-assert sub in [1,2,5,7]
-
 
 from scipy.stats import pearsonr,binom,linregress
 import numpy as np
@@ -47,7 +43,7 @@ net_list = [
     ('swav','avgpool')
     ]
 
-feats_dir = 'data/eval_features/subj{:02d}'.format(sub)
+feats_dir = 'data/eval_features'.format(sub)
 test_dir = 'data/eval_features/test_images'
 num_test = 982
 distance_fn = sp.spatial.distance.correlation
@@ -75,7 +71,7 @@ from skimage.metrics import structural_similarity as ssim
 ssim_list = []
 pixcorr_list = []
 for i in range(982):
-    gen_image = Image.open('results/versatile_diffusion/subj{:02d}/{}.png'.format(sub,i)).resize((425,425))
+    gen_image = Image.open('results/versatile_diffusion/{}.png'.format(sub,i)).resize((425,425))
     gt_image = Image.open('data/nsddata_stimuli/test_images/{}.png'.format(i))
     gen_image = np.array(gen_image)/255.0
     gt_image = np.array(gt_image)/255.0
@@ -90,4 +86,5 @@ ssim_list = np.array(ssim_list)
 pixcorr_list = np.array(pixcorr_list)
 print('PixCorr: {}'.format(pixcorr_list.mean()))
 print('SSIM: {}'.format(ssim_list.mean()))
+
 

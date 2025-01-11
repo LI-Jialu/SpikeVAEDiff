@@ -29,12 +29,16 @@ import torchvision.transforms as T
 import pickle
 
 import argparse
+
+# Argument Parser
 parser = argparse.ArgumentParser(description='Argument Parser')
-parser.add_argument("-sub", "--sub",help="Subject Number",default=1)
+parser.add_argument("-bs", "--bs", help="Batch Size", default=30, type=int)
+parser.add_argument("-data", "--data_root", help="Path to image dataset root", default="./data/spike_stimuli/natural_scenes_dataset")
+parser.add_argument("-pred", "--pred_latents", help="Path to predicted latents npy file", default="./data/extracted_features/nsd_vdvae_features_31.npz")
+parser.add_argument("-out", "--output_dir", help="Output directory for reconstructed images", default="./results/vdvae/")
+parser = argparse.ArgumentParser(description='Argument Parser')
 parser.add_argument("-bs", "--bs",help="Batch Size",default=30)
 args = parser.parse_args()
-sub=int(args.sub)
-assert sub in [1,2,5,7]
 batch_size=int(args.bs)
 
 print('Libs imported')
@@ -54,34 +58,97 @@ ema_vae = load_vaes(H)
 
   
 class batch_generator_external_images(Dataset):
-
-    def __init__(self, data_path):
+    def __init__(self, data_path, transform=None):
+        """
+        Args:
+            data_path (str): Path to the dataset directory containing image folders.
+            transform (callable, optional): Optional transform to be applied on a sample.
+        """
         self.data_path = data_path
-        self.im = np.load(data_path).astype(np.uint8)
+        self.transform = transform
+        self.image_paths = []
 
-
-    def __getitem__(self,idx):
-        img = Image.fromarray(self.im[idx])
-        img = T.functional.resize(img,(64,64))
-        img = torch.tensor(np.array(img)).float()
-        #img = img/255
-        #img = img*2 - 1
-        return img
+        # Collect all image file paths from the given directory
+        for folder in sorted(os.listdir(self.data_path)):
+            folder_path = os.path.join(self.data_path, folder)
+            if os.path.isdir(folder_path):
+                for img_name in sorted(os.listdir(folder_path)):
+                    if img_name.endswith('.jpeg') or img_name.endswith('.jpg') or img_name.endswith('.png'):  # Add other formats if needed
+                        self.image_paths.append(os.path.join(folder_path, img_name))
 
     def __len__(self):
-        return  len(self.im)
+        return len(self.image_paths)
+
+    def __getitem__(self, idx):
+        # Get image path from the list
+        img_path = self.image_paths[idx]
+        
+        # Open image
+        img = Image.open(img_path).convert('RGB')  # Ensure image is in RGB format
+        
+        # Apply transform if specified
+        if self.transform:
+            img = self.transform(img)
+        
+        return img
+
+# Define transforms and load data
+transform = T.Compose([
+    T.Resize((64, 64)),  # Resize to 64x64
+    T.ToTensor(),        # Convert to tensor [C, H, W]
+])
 
 
+# Dataset Class for JPEG Images
+class ImageFolderDataset(Dataset):
+    def __init__(self, root_dir, transform=None):
+        self.root_dir = root_dir
+        self.transform = transform
+        self.image_paths = []
+        for folder in sorted(os.listdir(self.root_dir)):
+            folder_path = os.path.join(self.root_dir, folder)
+            if os.path.isdir(folder_path):
+                for img_name in sorted(os.listdir(folder_path)):
+                    if img_name.endswith('.jpeg'):
+                        self.image_paths.append(os.path.join(folder_path, img_name))
 
-image_path = 'data/processed_data/subj{:02d}/nsd_test_stim_sub{}.npy'.format(sub,sub)
+    def __len__(self):
+        return len(self.image_paths)
+
+    def __getitem__(self, idx):
+        img_path = self.image_paths[idx]
+        img = Image.open(img_path).convert('RGB')
+        if self.transform:
+            img = self.transform(img)
+        return img
+
+image_path = "./data/spike_stimuli/natural_scenes_dataset"
 test_images = batch_generator_external_images(data_path = image_path)
-testloader = DataLoader(test_images,batch_size,shuffle=False)
+
+# Data directory
+data_root = './data/spike_stimuli/natural_scenes_dataset'
+dataset = ImageFolderDataset(root_dir=data_root, transform=transform)
+
+# Split dataset into train and test sets
+split_idx = int(0.8 * len(dataset))  # 80% for train, 20% for test
+train_dataset = torch.utils.data.Subset(dataset, range(0, split_idx))
+test_dataset = torch.utils.data.Subset(dataset, range(split_idx, len(dataset)))
+
+trainloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False)
+testloader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+
+# testloader = DataLoader(test_images,batch_size,shuffle=False)
 
 test_latents = []
-for i,x in enumerate(testloader):
+# max_batches = 2
+for i, x in enumerate(testloader):
+#   if i >= max_batches:
+#     break
   data_input, target = preprocess_fn(x)
+  data_input = data_input.permute(0, 2, 3, 1)
   with torch.no_grad():
         print(i*batch_size)
+        print(data_input.shape)
         activations = ema_vae.encoder.forward(data_input)
         px_z, stats = ema_vae.decoder.forward(activations, get_latents=True)
         #recons = ema_vae.decoder.out_net.sample(px_z)
@@ -94,7 +161,8 @@ for i,x in enumerate(testloader):
         #imshow(imgrid(test_images[i*batch_size : (i+1)*batch_size], cols=batch_size,pad=20))
 test_latents = np.concatenate(test_latents)      
 
-pred_latents = np.load('data/predicted_features/subj{:02d}/nsd_vdvae_nsdgeneral_pred_sub{}_31l_alpha50k.npy'.format(sub,sub))
+
+pred_latents = np.load("./data/predicted_features/vdvae_predicted_latents.npz")
 ref_latent = stats
 
 # Transfor latents from flattened representation to hierarchical
@@ -110,7 +178,8 @@ def latent_transformation(latents, ref):
   return transformed_latents
 
 idx = range(len(test_images))
-input_latent = latent_transformation(pred_latents[idx],ref_latent)
+print(pred_latents['predicted_latents'].shape)
+input_latent = latent_transformation(pred_latents['predicted_latents'],ref_latent)
 
   
 def sample_from_hier_latents(latents,sample_ids):
@@ -133,6 +202,5 @@ for i in range(int(np.ceil(len(test_images)/batch_size))):
       im = sample_from_latent[j]
       im = Image.fromarray(im)
       im = im.resize((512,512),resample=3)
-      im.save('results/vdvae/subj{:02d}/{}.png'.format(sub,i*batch_size+j))
+      im.save('results/vdvae/{}.png'.format(i*batch_size+j))
       
-
